@@ -1,119 +1,227 @@
 const express = require('express');
 const router = express.Router();
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
 const db = require('../database');
+const bcrypt = require('bcrypt');
 
-const JWT_SECRET = 'your_jwt_secret_key'; // change to a strong secret
+const SALT_ROUNDS = 10;
 
-// ─── REGISTER ────────────────────────────────────────────────────────────────
-// POST /api/users/register
-router.post('/register', async (req, res) => {
-  // Frontend sends: fullname, email, password, role, contact_info
-  const { fullname, email, password, role, contact_info } = req.body;
-
-  if (!fullname || !email || !password || !contact_info) {
-    return res.status(400).json({
-      success: false,
-      message: 'All fields are required.',
-    });
-  }
-
+// ─── GET ALL USERS ────────────────────────────────────────
+router.get('/', async (req, res) => {
   try {
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const allowedRoles = ['admin', 'manager', 'staff', 'customer', 'delivery', 'driver', 'chef', 'waiter', 'cashier'];
-    const userRole = allowedRoles.includes(role?.toLowerCase()) ? role.toLowerCase() : 'customer';
-
-    await db.query(
-      `INSERT INTO user (fullname, emailaddress, contactnumber, password, role)
-       VALUES (?, ?, ?, ?, ?)`,
-      [fullname, email, contact_info, hashedPassword, userRole]
+    const [rows] = await db.query(
+      'SELECT id, fullname, emailaddress, contactnumber, role, created_at FROM user'
     );
-
-    return res.status(201).json({
-      success: true,
-      message: 'User registered successfully.',
-    });
-
+    res.json({ success: true, data: rows });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') {
-      return res.status(409).json({
-        success: false,
-        message: 'Email address already in use.',
-      });
-    }
-    console.error(err);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error.',
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── GET ALL DRIVERS ──────────────────────────────────────
+router.get('/drivers', async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT 
+        id, 
+        fullname, 
+        emailaddress, 
+        contactnumber,
+        role,
+        created_at
+      FROM user 
+      WHERE role = 'driver'
+      ORDER BY fullname ASC`
+    );
+    
+    // Format the response to match frontend Driver interface
+    const formattedDrivers = rows.map(driver => ({
+      id: driver.id.toString(),
+      name: driver.fullname,
+      email: driver.emailaddress,
+      phone: driver.contactnumber
+    }));
+    
+    res.json({ 
+      success: true, 
+      data: formattedDrivers,
+      count: formattedDrivers.length
+    });
+  } catch (err) {
+    console.error('Error fetching drivers:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch drivers',
+      error: err.message 
     });
   }
 });
 
-// ─── LOGIN ───────────────────────────────────────────────────────────────────
-// POST /api/users/login
-router.post('/login', async (req, res) => {
-  // Frontend sends: email, password
-  const { email, password } = req.body;
-
-  if (!email || !password) {
-    return res.status(400).json({
-      success: false,
-      message: 'Email and password are required.',
+// ─── GET DRIVER BY ID ─────────────────────────────────────
+router.get('/drivers/:id', async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT 
+        id, 
+        fullname, 
+        emailaddress, 
+        contactnumber,
+        role,
+        created_at
+      FROM user 
+      WHERE id = ? AND role = 'driver'`,
+      [req.params.id]
+    );
+    
+    if (!rows.length) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Driver not found' 
+      });
+    }
+    
+    const driver = rows[0];
+    const formattedDriver = {
+      id: driver.id.toString(),
+      name: driver.fullname,
+      email: driver.emailaddress,
+      phone: driver.contactnumber
+    };
+    
+    res.json({ 
+      success: true, 
+      data: formattedDriver 
     });
+  } catch (err) {
+    console.error('Error fetching driver:', err);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Failed to fetch driver',
+      error: err.message 
+    });
+  }
+});
+
+// ─── GET USER BY ID ───────────────────────────────────────
+router.get('/:id', async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      'SELECT id, fullname, emailaddress, contactnumber, role, created_at FROM user WHERE id = ?',
+      [req.params.id]
+    );
+    if (!rows.length) return res.status(404).json({ success: false, message: 'User not found' });
+    res.json({ success: true, data: rows[0] });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── REGISTER ─────────────────────────────────────────────
+router.post('/register', async (req, res) => {
+  const fullname      = req.body.fullname;
+  const emailaddress  = req.body.emailaddress || req.body.email;
+  const contactnumber = req.body.contactnumber || req.body.contact_info;
+  const password      = req.body.password;
+  const role          = req.body.role || 'customer';
+
+  if (!fullname || !emailaddress || !contactnumber || !password) {
+    return res.status(400).json({ success: false, message: 'All fields are required' });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+    
+    const query = 'INSERT INTO user (fullname, emailaddress, contactnumber, password, role) VALUES (?, ?, ?, ?, ?)';
+    const values = [fullname, emailaddress, contactnumber, hashedPassword, role.toLowerCase()];
+    
+    const [result] = await db.query(query, values);
+    res.status(201).json({ 
+      success: true, 
+      message: 'User registered', 
+      userId: result.insertId 
+    });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: 'Email already in use' });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── LOGIN ────────────────────────────────────────────────
+router.post('/login', async (req, res) => {
+  const emailaddress = req.body.emailaddress || req.body.email;
+  const { password } = req.body;
+
+  if (!emailaddress || !password) {
+    return res.status(400).json({ success: false, message: 'Email and password are required' });
   }
 
   try {
     const [rows] = await db.query(
       'SELECT * FROM user WHERE emailaddress = ?',
-      [email]
+      [emailaddress]
     );
 
-    if (rows.length === 0) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password.',
-      });
+    if (!rows.length) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
     const user = rows[0];
+    const match = await bcrypt.compare(password, user.password);
 
-    const passwordMatch = await bcrypt.compare(password, user.password);
-
-    if (!passwordMatch) {
-      return res.status(401).json({
-        success: false,
-        message: 'Invalid email or password.',
-      });
+    if (!match) {
+      return res.status(401).json({ success: false, message: 'Invalid credentials' });
     }
 
-    const token = jwt.sign(
-      { id: user.id, email: user.emailaddress, role: user.role },
-      JWT_SECRET,
-      { expiresIn: '1d' }
-    );
-
-    // Response matches what frontend expects: { success, data }
-    return res.status(200).json({
-      success: true,
-      message: 'Login successful.',
-      token,
-      data: {
-        id:            user.id,
-        fullname:      user.fullname,
-        emailaddress:  user.emailaddress,
-        contactnumber: user.contactnumber,
-        role:          user.role,
-      },
-    });
+    const { password: _, ...userWithoutPassword } = user;
+    res.json({ success: true, message: 'Login successful', data: userWithoutPassword });
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({
-      success: false,
-      message: 'Server error.',
-    });
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── UPDATE USER ──────────────────────────────────────────
+router.put('/:id', async (req, res) => {
+  const fullname      = req.body.fullname;
+  const emailaddress  = req.body.emailaddress || req.body.email;
+  const contactnumber = req.body.contactnumber || req.body.contact_info;
+  const role          = req.body.role;
+  const password      = req.body.password;
+
+  try {
+    let query = 'UPDATE user SET fullname=?, emailaddress=?, contactnumber=?, role=?';
+    const values = [fullname, emailaddress, contactnumber, role];
+    
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
+      query += ', password=?';
+      values.push(hashedPassword);
+    }
+    
+    query += ' WHERE id=?';
+    values.push(req.params.id);
+    
+    await db.query(query, values);
+    res.json({ success: true, message: 'User updated' });
+  } catch (err) {
+    if (err.code === 'ER_DUP_ENTRY') {
+      return res.status(409).json({ success: false, message: 'Email already in use' });
+    }
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// ─── DELETE USER ──────────────────────────────────────────
+router.delete('/:id', async (req, res) => {
+  try {
+    const [result] = await db.query('DELETE FROM user WHERE id = ?', [req.params.id]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ success: false, message: 'User not found' });
+    }
+    res.json({ success: true, message: 'User deleted' });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
   }
 });
 
