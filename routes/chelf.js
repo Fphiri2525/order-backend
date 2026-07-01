@@ -59,7 +59,7 @@ router.get('/chef-orders', async (req, res) => {
 
         // Get order items for all orders
         const orderIds = results.map(order => order.order_id);
-        
+
         const itemsQuery = `
             SELECT 
                 oi.order_id,
@@ -160,7 +160,7 @@ router.get('/delivered-paid-orders', async (req, res) => {
 
         // Get order items for all orders
         const orderIds = results.map(order => order.order_id);
-        
+
         const itemsQuery = `
             SELECT 
                 oi.order_id,
@@ -290,7 +290,15 @@ router.patch('/order/:orderId/status', async (req, res) => {
                 if (customer && customer.customer_email) {
                     console.log(`📧 [order-ready-email] Sending "order ready" email to ${customer.customer_email} (username: ${customer.username || 'N/A'}) for order ${orderId}`);
 
-                    sendEmail({
+                    // Sanity-check sendEmail is actually a function before calling it.
+                    // Catches the classic bug where the import resolves to undefined
+                    // (wrong export name, circular require, module not loaded, etc.)
+                    console.log(`🔎 [order-ready-email] typeof sendEmail: ${typeof sendEmail}`);
+                    if (typeof sendEmail !== 'function') {
+                        console.error(`❌ [order-ready-email] sendEmail is not a function! Check the import in '../lib/email' — got:`, sendEmail);
+                    }
+
+                    const emailPayload = {
                         to: customer.customer_email,
                         subject: `Your order ${orderId} is ready!`,
                         html: `
@@ -299,12 +307,50 @@ router.patch('/order/:orderId/status', async (req, res) => {
                             <p>A rider will be assigned shortly to deliver it to you.</p>
                             <p>Thanks for ordering with us!</p>
                         `,
-                    })
+                    };
+                    console.log(`🔎 [order-ready-email] Email payload:`, {
+                        to: emailPayload.to,
+                        subject: emailPayload.subject
+                    });
+
+                    const emailStartTime = Date.now();
+
+                    // Race against a timeout so a hung SMTP connection (bad host/port,
+                    // firewall, slow auth handshake) doesn't just disappear silently
+                    const emailTimeout = new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error('sendEmail timed out after 15s')), 15000)
+                    );
+
+                    Promise.race([sendEmail(emailPayload), emailTimeout])
                         .then((sendResult) => {
-                            console.log(`✅ [order-ready-email] sendEmail resolved for order ${orderId}:`, sendResult);
+                            const elapsedMs = Date.now() - emailStartTime;
+                            console.log(`✅ [order-ready-email] sendEmail resolved for order ${orderId} in ${elapsedMs}ms`);
+                            console.log(`✅ [order-ready-email] sendEmail result:`, JSON.stringify(sendResult, null, 2));
+
+                            // nodemailer-style libs return these fields — log them if present,
+                            // they tell you whether the SMTP server actually accepted the message
+                            if (sendResult && typeof sendResult === 'object') {
+                                if ('messageId' in sendResult) {
+                                    console.log(`✅ [order-ready-email] messageId: ${sendResult.messageId}`);
+                                }
+                                if ('accepted' in sendResult) {
+                                    console.log(`✅ [order-ready-email] accepted recipients:`, sendResult.accepted);
+                                }
+                                if ('rejected' in sendResult && sendResult.rejected && sendResult.rejected.length > 0) {
+                                    console.warn(`⚠️ [order-ready-email] rejected recipients:`, sendResult.rejected);
+                                }
+                            }
                         })
                         .catch((err) => {
-                            console.error(`❌ [order-ready-email] sendEmail failed for order ${orderId}:`, err);
+                            const elapsedMs = Date.now() - emailStartTime;
+                            console.error(`❌ [order-ready-email] sendEmail failed for order ${orderId} after ${elapsedMs}ms`);
+                            console.error(`❌ [order-ready-email] Error name: ${err.name}, message: ${err.message}`);
+                            console.error(`❌ [order-ready-email] Full error:`, err);
+                            // Common nodemailer/SMTP error fields — usually tell you exactly
+                            // what went wrong (auth failure, connection refused, etc.)
+                            if (err.code) console.error(`❌ [order-ready-email] err.code: ${err.code}`);
+                            if (err.command) console.error(`❌ [order-ready-email] err.command: ${err.command}`);
+                            if (err.responseCode) console.error(`❌ [order-ready-email] err.responseCode: ${err.responseCode}`);
                         });
                 } else {
                     console.warn(`⚠️ No email found for customer on order ${orderId}, skipping notification`);
@@ -427,7 +473,7 @@ router.get('/order/:orderId', async (req, res) => {
 router.get('/orders/status/:status', async (req, res) => {
     try {
         const { status } = req.params;
-        
+
         // Validate status
         const validStatuses = ['preparing', 'ready', 'delivered'];
         if (!validStatuses.includes(status)) {
